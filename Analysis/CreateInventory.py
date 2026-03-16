@@ -35,7 +35,7 @@ def proces_one_nc(base_path, name, out_file, out_table):
     # day = match.group("day")
 
     # out_table[name] = [year, month, day, full_path]
-    out_table.loc[len(out_table)] = [name, year, month, day, full_path]
+    out_table.loc[len(out_table)] = [name, year, month, day, out_full_path]
 
 
 
