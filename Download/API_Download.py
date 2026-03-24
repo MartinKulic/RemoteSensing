@@ -20,8 +20,8 @@ def read_secrets():
 # I N I T
 
 # cas
-start_date = datetime(2018, 6, 1)
-end_date = datetime(2023, 10, 31)
+start_date = datetime(2017, 7, 1)
+end_date = datetime(2017, 10, 31)
 
 # Európa bounding box
 # Longitude (X) and Latitude (Y)
