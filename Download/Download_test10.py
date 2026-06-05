@@ -47,11 +47,13 @@ CLIENT_SECRET = os.environ.get("CDSE_CLIENT_SECRET", "YOUR_CLIENT_SECRET_HERE")
 
 # Area of interest (WGS84)
 AOI_BBOX = {
-    "west":  18.51635,
-    "south": 48.78376,
-    "east":  18.80255,
-    #"north": 49.04104,
-    "north": 49.01,
+    "west":  18.50000,  # ←
+
+    "south": 48.77910,  # ↓
+
+    "east":  18.83029,  # →
+
+    "north": 49.01070,  # ↑
 }
 
 # Output directory
