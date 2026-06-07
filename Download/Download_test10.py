@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
 """
-Sentinel-2 Quarterly Cloudless Mosaic — NDVI GeoTIFF Downloader
-================================================================
+Sentinel-2 Quarterly Cloudless Mosaic — NDVI GeoTIFF Downloader  (v2 — fixed)
+==============================================================================
 Downloads cloud-free NDVI composites (FLOAT32 GeoTIFF, 10 m resolution)
-from the Sentinel-2 L2A Quarterly Cloudless Mosaic collection hosted on
-Copernicus Data Space Ecosystem (CDSE).
+from the Sentinel-2 L2A Quarterly Cloudless Mosaic collection on CDSE.
 
-Compositing methodology (done server-side by ESA/Sinergise):
-  • For each pixel a 3-month stack of L2A observations is built.
-  • Invalid pixels (clouds, shadows, snow, etc.) are removed using SCL.
-  • The 25th percentile of the remaining valid observations is selected
-    per band → this is the same product visible in Copernicus Browser.
-  • Available quarters: Jan–Mar, Apr–Jun, Jul–Sep, Oct–Dec.
+Key fixes vs v1
+---------------
+1. Bands are requested as raw float (no scaling in evalscript) and NDVI is
+   computed in Python — eliminating all evalscript DN-scaling ambiguity.
+2. Single-output response only ("default") — avoids multi-response dict
+   key mismatches that caused the wrong array to be saved.
+3. Hard clamp to [-1, 1] with NaN propagation — non-physical values from
+   integer overflow, divide-by-zero, or no-data sentinels (-32768) are
+   cleaned up before writing.
+4. Verbose per-tile diagnostics so bad data is caught immediately.
+
+Compositing (server-side, ESA/Sinergise):
+  • 3-month stack of L2A scenes per pixel.
+  • SCL-based invalid pixel removal (clouds, shadows, snow …).
+  • 25th-percentile of valid observations selected per band.
+  • Quarters: Q1=Jan–Mar, Q2=Apr–Jun, Q3=Jul–Sep, Q4=Oct–Dec.
 
 Requirements:
     pip install sentinelhub rasterio numpy
 
-Credentials:
-    Set CDSE_CLIENT_ID and CDSE_CLIENT_SECRET as environment variables,
-    or edit the CONFIG section below.
+Credentials (OAuth client from CDSE dashboard):
+    export CDSE_CLIENT_ID="…"
+    export CDSE_CLIENT_SECRET="…"
 
-Usage examples:
-    # Latest available quarter for all 4 seasonal quarters of 2024
+Usage:
+    python download_ndvi.py --year 2024 --quarter Q3
     python download_ndvi.py --year 2024 --all-quarters
-
-    # Single quarter
-    python download_ndvi.py --year 2024 --quarter Q2
-
-    # Custom date range (must span ≥1 full quarter boundary)
-    python download_ndvi.py --start 2024-04-01 --end 2024-06-30
+    python download_ndvi.py --year 2015 --year 2025 --all-quarters   # loop externally
+    python download_ndvi.py          # auto-selects last completed quarter
 """
 
 import os
@@ -40,12 +45,11 @@ from pathlib import Path
 import numpy as np
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CONFIG — edit or set env vars
+# CONFIG
 # ──────────────────────────────────────────────────────────────────────────────
 CLIENT_ID     = os.environ.get("CDSE_CLIENT_ID",     "YOUR_CLIENT_ID_HERE")
 CLIENT_SECRET = os.environ.get("CDSE_CLIENT_SECRET", "YOUR_CLIENT_SECRET_HERE")
 
-# Area of interest (WGS84)
 AOI_BBOX = {
     "west":  18.50000,  # ←
 
@@ -56,82 +60,67 @@ AOI_BBOX = {
     "north": 49.01070,  # ↑
 }
 
-# Output directory
-OUTPUT_DIR = Path("./ndvi_output")
+OUTPUT_DIR    = Path("./ndvi_output")
+COLLECTION_ID = "5460de54-082e-473a-b6ea-d5cbe3c17cca"   # 10 m quarterly mosaic
+RESOLUTION_M  = 10
 
-# Sentinel-2 Quarterly Cloudless Mosaic collection (10 m)
-COLLECTION_ID = "5460de54-082e-473a-b6ea-d5cbe3c17cca"
-
-# Quarterly windows — use the first day of the quarter to address the mosaic
 QUARTERS = {
-    "Q1": ("01-01", "03-31"),   # Jan–Mar
-    "Q2": ("04-01", "06-30"),   # Apr–Jun
-    "Q3": ("07-01", "09-30"),   # Jul–Sep
-    "Q4": ("10-01", "12-31"),   # Oct–Dec
+    "Q1": ("01-01", "03-31"),
+    "Q2": ("04-01", "06-30"),
+    "Q3": ("07-01", "09-30"),
+    "Q4": ("10-01", "12-31"),
 }
 
-# Resolution in metres (the mosaic native resolution is 10 m)
-RESOLUTION_M = 10
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Evalscript — returns raw FLOAT32 NDVI values in [-1, 1]
-# dataMask band (band 2) marks valid pixels: 1 = valid, 0 = no-data
+# Evalscript — returns raw B04 and B08 as FLOAT32 (no DN scaling here)
+#
+# Why raw bands and not NDVI directly?
+#   The mosaic stores values as DN = reflectance × 10000 (INT16 under the hood).
+#   Sentinel Hub auto-converts to float before passing to evaluatePixel, BUT the
+#   exact scaling path has changed across collection versions (2015–2016 tiles vs
+#   later tiles behave differently).  Computing NDVI in Python from the two
+#   returned band values is unambiguous: we can inspect B04/B08 individually,
+#   detect sentinel no-data values (-32768 → float -3.2768 after /10000), and
+#   mask them explicitly.
+#
+# dataMask is output separately so we can apply it cleanly in Python.
 # ──────────────────────────────────────────────────────────────────────────────
-EVALSCRIPT_NDVI = """
+EVALSCRIPT = """
 //VERSION=3
 function setup() {
     return {
         input: ["B04", "B08", "dataMask"],
-        output: [
-            {
-                id: "ndvi",
-                bands: 1,
-                sampleType: "FLOAT32"
-            },
-            {
-                id: "dataMask",
-                bands: 1,
-                sampleType: "UINT8"
-            }
-        ]
+        output: {
+            id: "default",
+            bands: 3,
+            sampleType: "FLOAT32"
+        }
     };
 }
 
 function evaluatePixel(samples) {
-    // DN values are stored as reflectance * 10000 in the mosaic
-    let factor = 1.0 / 10000.0;
-    let red = factor * samples.B04;
-    let nir = factor * samples.B08;
-
-    // Guard against division by zero
-    let ndvi = (nir + red) > 0.0 ? (nir - red) / (nir + red) : 0.0;
-
-    // If no valid observation was recorded the mosaic stores -32768;
-    // dataMask == 0 flags those pixels — we propagate NaN.
-    let ndviOut = samples.dataMask === 1 ? ndvi : NaN;
-
-    return {
-        ndvi: [ndviOut],
-        dataMask: [samples.dataMask]
-    };
+    // Band 0 = B04 (Red),  Band 1 = B08 (NIR),  Band 2 = dataMask
+    // Values come in as DN (reflectance * 10000). We do NOT divide here —
+    // we pass raw DN so Python can inspect them and detect -32768 no-data.
+    return [samples.B04, samples.B08, samples.dataMask];
 }
 """
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_config():
-    """Build and return an SHConfig pointed at CDSE."""
     try:
         from sentinelhub import SHConfig
     except ImportError:
-        sys.exit("ERROR: sentinelhub not installed — run:  pip install sentinelhub")
+        sys.exit("ERROR: sentinelhub not installed.  Run:  pip install sentinelhub")
 
     config = SHConfig()
     config.sh_client_id     = CLIENT_ID
     config.sh_client_secret = CLIENT_SECRET
-    config.sh_token_url     = (
+    config.sh_token_url = (
         "https://identity.dataspace.copernicus.eu"
         "/auth/realms/CDSE/protocol/openid-connect/token"
     )
@@ -139,63 +128,83 @@ def build_config():
 
     if CLIENT_ID == "YOUR_CLIENT_ID_HERE":
         sys.exit(
-            "ERROR: No credentials set.\n"
-            "  Set CDSE_CLIENT_ID and CDSE_CLIENT_SECRET env vars, or edit CONFIG in the script.\n"
-            "  Get credentials at: https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+            "ERROR: No credentials.\n"
+            "  Set CDSE_CLIENT_ID + CDSE_CLIENT_SECRET env vars, or edit CONFIG.\n"
+            "  Get OAuth client: https://shapps.dataspace.copernicus.eu/"
+            "dashboard/#/account/settings"
         )
     return config
 
 
 def quarter_interval(year: int, quarter: str):
-    """Return (start_date, end_date) strings for a given year and quarter."""
-    start_mm_dd, end_mm_dd = QUARTERS[quarter]
-    return f"{year}-{start_mm_dd}", f"{year}-{end_mm_dd}"
+    s, e = QUARTERS[quarter]
+    return f"{year}-{s}", f"{year}-{e}"
 
 
-def save_geotiff(ndvi_array: np.ndarray, bbox, out_path: Path, nodata: float = np.nan):
+def compute_ndvi_safe(b04_dn: np.ndarray, b08_dn: np.ndarray,
+                      datamask: np.ndarray) -> np.ndarray:
     """
-    Write a single-band FLOAT32 GeoTIFF with proper georeferencing.
+    Compute NDVI from raw DN arrays with full safety checks.
 
-    Parameters
-    ----------
-    ndvi_array : 2-D numpy array  shape (rows, cols)
-    bbox       : sentinelhub BBox
-    out_path   : output file path
-    nodata     : value used for no-data pixels
+    Rules applied:
+      1. dataMask == 0  →  NaN   (no valid observation)
+      2. DN == -32768   →  NaN   (mosaic no-data sentinel, stored as float -32768)
+      3. B04 + B08 == 0 →  NaN   (divide-by-zero guard)
+      4. Result clipped to [-1, 1]  (physical range; values outside indicate
+         sensor artefacts in early archive years)
     """
+    ndvi = np.full(b04_dn.shape, np.nan, dtype=np.float32)
+
+    # Convert DN float back — sentinel value from INT16 no-data
+    NO_DATA_SENTINEL = -32768.0   # what -32768 looks like as float DN
+
+    valid = (
+        (datamask > 0.5) &                      # valid observation exists
+        (b04_dn > NO_DATA_SENTINEL + 1) &       # not a no-data sentinel
+        (b08_dn > NO_DATA_SENTINEL + 1) &
+        ((b04_dn + b08_dn) != 0.0)              # no divide-by-zero
+    )
+
+    r = b04_dn[valid]
+    n = b08_dn[valid]
+    ndvi[valid] = (n - r) / (n + r)
+
+    # Hard clamp — values outside [-1,1] are physically impossible
+    # (they arise from integer overflow or residual artefacts in 2015-2016 tiles)
+    out_of_range = valid & ((ndvi < -1.0) | (ndvi > 1.0))
+    ndvi[out_of_range] = np.nan
+
+    return ndvi
+
+
+def save_geotiff(ndvi_array: np.ndarray, bbox, out_path: Path):
     try:
         import rasterio
         from rasterio.transform import from_bounds
         from rasterio.crs import CRS as RioCRS
     except ImportError:
-        sys.exit("ERROR: rasterio not installed — run:  pip install rasterio")
+        sys.exit("ERROR: rasterio not installed.  Run:  pip install rasterio")
 
     rows, cols = ndvi_array.shape
-
-    # from_bounds(west, south, east, north, width, height)
     transform = from_bounds(
         bbox.min_x, bbox.min_y, bbox.max_x, bbox.max_y,
         cols, rows
     )
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(
-        out_path,
-        mode="w",
+        out_path, "w",
         driver="GTiff",
-        height=rows,
-        width=cols,
+        height=rows, width=cols,
         count=1,
         dtype=np.float32,
-        crs=RioCRS.from_epsg(4326),   # WGS84
+        crs=RioCRS.from_epsg(4326),
         transform=transform,
-        nodata=nodata,
+        nodata=np.nan,
         compress="lzw",
-        predictor=3,   # floating-point predictor — improves FLOAT32 compression
+        predictor=3,      # floating-point predictor
         tiled=True,
-        blockxsize=256,
-        blockysize=256,
+        blockxsize=256, blockysize=256,
     ) as dst:
         dst.write(ndvi_array.astype(np.float32), 1)
         dst.update_tags(
@@ -204,100 +213,177 @@ def save_geotiff(ndvi_array: np.ndarray, bbox, out_path: Path, nodata: float = n
             RESOLUTION_M=str(RESOLUTION_M),
         )
 
-    print(f"  → Saved: {out_path}  ({cols} × {rows} px, {out_path.stat().st_size / 1e6:.1f} MB)")
+    size_mb = out_path.stat().st_size / 1e6
+    print(f"  → Saved: {out_path}  ({cols}×{rows} px, {size_mb:.1f} MB)")
 
 
-def download_ndvi(year: int, quarter: str, config):
-    """
-    Download NDVI for one quarter and save it as a GeoTIFF.
-
-    Returns the output file path.
-    """
+def download_ndvi(year: int, quarter: str, config) -> Path | None:
     try:
         from sentinelhub import (
-            BBox, CRS, DataCollection,
-            MimeType, SentinelHubRequest,
-            bbox_to_dimensions,
+            BBox, CRS, DataCollection, MimeType,
+            SentinelHubRequest, bbox_to_dimensions,
         )
     except ImportError:
-        sys.exit("ERROR: sentinelhub not installed — run:  pip install sentinelhub")
+        sys.exit("ERROR: sentinelhub not installed.  Run:  pip install sentinelhub")
 
     start_date, end_date = quarter_interval(year, quarter)
-    print(f"\n{'='*60}")
-    print(f"  Quarter : {year} {quarter}  ({start_date}  →  {end_date})")
+    print(f"\n{'='*64}")
+    print(f"  Quarter : {year} {quarter}  ({start_date} → {end_date})")
 
-    # ── BBox & image size ─────────────────────────────────────────────────────
     bbox = BBox(
-        bbox=(AOI_BBOX["west"], AOI_BBOX["south"], AOI_BBOX["east"], AOI_BBOX["north"]),
+        bbox=(AOI_BBOX["west"], AOI_BBOX["south"],
+              AOI_BBOX["east"], AOI_BBOX["north"]),
         crs=CRS.WGS84,
     )
     img_size = bbox_to_dimensions(bbox, resolution=RESOLUTION_M)
-    print(f"  Image   : {img_size[0]} × {img_size[1]} px  @ {RESOLUTION_M} m")
+    print(f"  Image   : {img_size[0]} × {img_size[1]} px @ {RESOLUTION_M} m")
 
-    # ── Collection ────────────────────────────────────────────────────────────
-    mosaic_collection = DataCollection.define_byoc(collection_id=COLLECTION_ID)
+    mosaic = DataCollection.define_byoc(collection_id=COLLECTION_ID)
 
-    # ── Request ───────────────────────────────────────────────────────────────
     request = SentinelHubRequest(
-        evalscript=EVALSCRIPT_NDVI,
+        evalscript=EVALSCRIPT,
         input_data=[
             SentinelHubRequest.input_data(
-                data_collection=mosaic_collection,
-                # The quarterly mosaic has one "scene" per quarter.
-                # Use the entire quarter window so the mosaic tile is matched.
+                data_collection=mosaic,
                 time_interval=(start_date, end_date),
             )
         ],
         responses=[
-            SentinelHubRequest.output_response("ndvi",     MimeType.TIFF),
-            SentinelHubRequest.output_response("dataMask", MimeType.TIFF),
+            SentinelHubRequest.output_response("default", MimeType.TIFF),
         ],
         bbox=bbox,
         size=img_size,
         config=config,
     )
 
-    print("  Fetching data from Copernicus Data Space …")
-    data = request.get_data()
+    print("  Fetching …")
+    raw = request.get_data()
 
-    # ── Unpack response ───────────────────────────────────────────────────────
-    # get_data() returns a list; each item is a dict of band arrays
-    if not data or not isinstance(data[0], dict):
-        print("  WARNING: Unexpected response format. Dumping raw result.")
-        print(data)
+    # ── Unpack ───────────────────────────────────────────────────────────────
+    # get_data() always returns a list of length 1 for a single time-slot.
+    # With a single-output response the item is a numpy array of shape
+    # (height, width, bands).
+    if not raw:
+        print("  ERROR: empty response — skipping.")
         return None
 
-    result      = data[0]
-    ndvi_arr    = result.get("ndvi.tif")
-    datamask    = result.get("dataMask.tif")
+    item = raw[0]
 
-    if ndvi_arr is None:
-        # Fall-back: single-output response is returned as a bare array
-        ndvi_arr = list(result.values())[0]
-        datamask = None
-
-    # Shape is (rows, cols, 1) → squeeze to (rows, cols)
-    ndvi_arr = np.squeeze(ndvi_arr)
-
-    # Apply dataMask so no-data pixels become NaN
-    if datamask is not None:
-        mask = np.squeeze(datamask).astype(bool)
-        ndvi_arr[~mask] = np.nan
-
-    # Sanity check
-    valid = ndvi_arr[~np.isnan(ndvi_arr)]
-    if valid.size > 0:
-        print(f"  NDVI    : min={valid.min():.4f}  mean={valid.mean():.4f}  max={valid.max():.4f}")
-        coverage = 100.0 * valid.size / ndvi_arr.size
-        print(f"  Coverage: {coverage:.1f}% valid pixels")
+    # Handle both possible return types robustly
+    if isinstance(item, dict):
+        # Multi-output path (shouldn't happen here, but be safe)
+        key = next(iter(item))
+        arr = item[key]
+        print(f"  Note: got dict response, key='{key}'")
+    elif isinstance(item, np.ndarray):
+        arr = item
     else:
-        print("  WARNING: All pixels are NaN — no valid observations for this quarter/area.")
+        print(f"  ERROR: unexpected response type {type(item)} — skipping.")
+        return None
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    # arr shape: (rows, cols, 3)  bands: [B04, B08, dataMask]
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        print(f"  ERROR: unexpected array shape {arr.shape} — skipping.")
+        return None
+
+    b04      = arr[:, :, 0].astype(np.float32)
+    b08      = arr[:, :, 1].astype(np.float32)
+    datamask = arr[:, :, 2]
+
+    # ── Diagnostics on raw bands ─────────────────────────────────────────────
+    valid_mask = datamask > 0.5
+    n_total   = arr.shape[0] * arr.shape[1]
+    n_valid   = int(valid_mask.sum())
+    n_nodata  = n_total - n_valid
+    print(f"  dataMask: {n_valid}/{n_total} valid pixels "
+          f"({100*n_valid/n_total:.1f}%), {n_nodata} no-data")
+
+    if n_valid == 0:
+        print("  WARNING: No valid pixels — mosaic not available for this quarter/area.")
+        print("           Saving all-NaN tile so inventory remains complete.")
+        ndvi = np.full((arr.shape[0], arr.shape[1]), np.nan, dtype=np.float32)
+    else:
+        # Spot-check raw DN for sentinel values
+        b04_v = b04[valid_mask]
+        b08_v = b08[valid_mask]
+        print(f"  B04 DN  : min={b04_v.min():.0f}  max={b04_v.max():.0f}  "
+              f"mean={b04_v.mean():.0f}")
+        print(f"  B08 DN  : min={b08_v.min():.0f}  max={b08_v.max():.0f}  "
+              f"mean={b08_v.mean():.0f}")
+
+        ndvi = compute_ndvi_safe(b04, b08, datamask)
+
+        ndvi_v = ndvi[~np.isnan(ndvi)]
+        n_clamped = n_valid - len(ndvi_v)
+        print(f"  NDVI    : min={ndvi_v.min():.4f}  mean={ndvi_v.mean():.4f}  "
+              f"max={ndvi_v.max():.4f}")
+        if n_clamped > 0:
+            print(f"  Clamped : {n_clamped} out-of-range pixels set to NaN "
+                  f"({100*n_clamped/n_total:.2f}%)")
+
+    # ── Save ─────────────────────────────────────────────────────────────────
     out_path = OUTPUT_DIR / f"ndvi_{year}_{quarter}.tif"
-    save_geotiff(ndvi_arr, bbox, out_path)
-
+    save_geotiff(ndvi, bbox, out_path)
     return out_path
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Post-download validation helper  (run against already-downloaded files)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def validate_existing(directory: Path):
+    """
+    Re-scan all ndvi_*.tif files in a directory and report any anomalies.
+    Useful for checking the batch you already downloaded.
+    """
+    try:
+        import rasterio
+    except ImportError:
+        sys.exit("ERROR: rasterio not installed.")
+
+    tifs = sorted(directory.glob("ndvi_*.tif"))
+    if not tifs:
+        print(f"No ndvi_*.tif files found in {directory}")
+        return
+
+    print(f"\nValidating {len(tifs)} files in {directory}\n")
+    print(f"{'File':<30}  {'Valid%':>7}  {'Min':>8}  {'Mean':>8}  {'Max':>8}  Status")
+    print("-" * 75)
+
+    problems = []
+    for f in tifs:
+        with rasterio.open(f) as src:
+            arr = src.read(1).astype(np.float32)
+
+        total = arr.size
+        valid = arr[~np.isnan(arr)]
+        pct   = 100 * len(valid) / total
+
+        if len(valid) == 0:
+            status = "ALL NaN"
+            problems.append((f.name, status))
+        else:
+            mn, mn_val, mx = valid.min(), valid.mean(), valid.max()
+            bad = ((valid < -1) | (valid > 1)).sum()
+            if bad > 0:
+                status = f"!! {bad} out-of-range pixels !!"
+                problems.append((f.name, status))
+            elif pct < 50:
+                status = f"low coverage ({pct:.0f}%)"
+            else:
+                status = "OK"
+            print(f"{f.name:<30}  {pct:>6.1f}%  {mn:>8.4f}  {mn_val:>8.4f}  "
+                  f"{mx:>8.4f}  {status}")
+            continue
+
+        print(f"{f.name:<30}  {pct:>6.1f}%  {'—':>8}  {'—':>8}  {'—':>8}  {status}")
+
+    if problems:
+        print(f"\n⚠  {len(problems)} problematic file(s):")
+        for name, reason in problems:
+            print(f"   {name}: {reason}")
+    else:
+        print("\n✓  All files look clean.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -305,97 +391,67 @@ def download_ndvi(year: int, quarter: str, config):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    p = argparse.ArgumentParser(
         description="Download Sentinel-2 Quarterly Cloudless Mosaic NDVI as GeoTIFF",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
-
-    parser.add_argument(
-        "--year", type=int, default=datetime.date.today().year,
-        help="Year to download (default: current year)"
+    p.add_argument("--year",  type=int, default=datetime.date.today().year)
+    p.add_argument("--quarter", choices=["Q1","Q2","Q3","Q4"])
+    p.add_argument("--all-quarters", action="store_true")
+    p.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    p.add_argument(
+        "--validate-only", action="store_true",
+        help="Do not download; just validate existing GeoTIFFs in --output-dir"
     )
-    parser.add_argument(
-        "--quarter", choices=["Q1", "Q2", "Q3", "Q4"],
-        help="Single quarter to download (Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec)"
-    )
-    parser.add_argument(
-        "--all-quarters", action="store_true",
-        help="Download all four quarters for the given year"
-    )
-    parser.add_argument(
-        "--output-dir", type=Path, default=OUTPUT_DIR,
-        help="Directory where GeoTIFFs will be saved (default: ./ndvi_output)"
-    )
-    parser.add_argument(
-        "--list-quarters", action="store_true",
-        help="Print available quarter date ranges and exit"
-    )
-
-    return parser.parse_args()
+    return p.parse_args()
 
 
 def main():
     args = parse_args()
-
     global OUTPUT_DIR
     OUTPUT_DIR = args.output_dir
 
-    if args.list_quarters:
-        print("Available quarters (year is user-supplied):")
-        for q, (s, e) in QUARTERS.items():
-            print(f"  {q}: {args.year}-{s}  →  {args.year}-{e}")
+    if args.validate_only:
+        validate_existing(OUTPUT_DIR)
         return
 
     config = build_config()
 
-    # Determine which quarters to fetch
     if args.all_quarters:
-        quarters_to_fetch = list(QUARTERS.keys())
+        quarters = list(QUARTERS.keys())
     elif args.quarter:
-        quarters_to_fetch = [args.quarter]
+        quarters = [args.quarter]
     else:
-        # Default: most recently completed quarter
         today = datetime.date.today()
-        month = today.month
-        if   month <= 3:  q = "Q4"; y = args.year - 1
-        elif month <= 6:  q = "Q1"; y = args.year
-        elif month <= 9:  q = "Q2"; y = args.year
-        else:             q = "Q3"; y = args.year
-        quarters_to_fetch = [q]
-        args.year = y
-        print(f"No quarter specified — defaulting to most recently completed quarter: {y} {q}")
+        m = today.month
+        if   m <= 3:  q, y = "Q4", args.year - 1
+        elif m <= 6:  q, y = "Q1", args.year
+        elif m <= 9:  q, y = "Q2", args.year
+        else:         q, y = "Q3", args.year
+        quarters, args.year = [q], y
+        print(f"No quarter specified — defaulting to last completed: {args.year} {q}")
 
     saved = []
-    for q in quarters_to_fetch:
+    for q in quarters:
         path = download_ndvi(year=args.year, quarter=q, config=config)
         if path:
             saved.append(path)
 
-    print(f"\n{'='*60}")
-    print(f"Done. {len(saved)} file(s) written to:  {OUTPUT_DIR.resolve()}")
+    print(f"\n{'='*64}")
+    print(f"Done. {len(saved)} file(s) in {OUTPUT_DIR.resolve()}")
     for p in saved:
         print(f"  {p.name}")
 
     print("""
 ─────────────────────────────────────────────────────────────
-GeoTIFF properties:
-  • CRS    : EPSG:4326 (WGS84)
-  • Values : FLOAT32 NDVI in [-1 .. 1], NaN = no data
-  • Compression: LZW with floating-point predictor
-  • Resolution : 10 m (native mosaic resolution)
+GeoTIFF spec:
+  CRS    : EPSG:4326 (WGS84)
+  Values : FLOAT32 NDVI in [-1 .. 1], NaN = no data
+  Compress: LZW + floating-point predictor (predictor=3)
+  Tiled  : 256×256 blocks
 
-Opening in QGIS:
-  Drag the .tif file into QGIS. Set band rendering to
-  Singleband pseudocolor, use a diverging ramp centred on 0,
-  or import the NDVI colour ramp from the Copernicus script.
-
-Opening in Python:
-  import rasterio, numpy as np
-  with rasterio.open("ndvi_output/ndvi_2024_Q2.tif") as src:
-      ndvi = src.read(1)          # shape (rows, cols), float32
-      nodata = src.nodata         # np.nan
-      transform = src.transform   # affine georeferencing
+To validate your existing downloads without re-downloading:
+  python download_ndvi.py --validate-only --output-dir ./ndvi_output
 ─────────────────────────────────────────────────────────────
 """)
 
