@@ -12,8 +12,8 @@ from pathlib import Path
 import argparse
 
 
-
 class Worker:
+    AVAILABLE_BANDS=["B02", "B03", "B04", "B08", "observations", "dataMask"]
     QUARTERS = [
         ("01-01", "03-31"),
         ("04-01", "06-30"),
@@ -23,14 +23,14 @@ class Worker:
     RESOLUTION    = 10
     COLLECTION_ID = "5460de54-082e-473a-b6ea-d5cbe3c17cca"
 
-    def __init__(self, year, quarter, bbox, path_out, path_secret = "./Secret"):
+    def __init__(self, year, quarter, bbox, path_out, bands, path_secret = "./Secret"):
         self.output_dir    = path_out
         self.year = year
         self.quarter = quarter
         self.bbox = bbox
         self.client_id, self.client_secret = self.__get_secret(path_secret)
         self.config = Worker.build_config(self.client_id, self.client_secret)
-        self.bands = ["B04", "B08", "observations", "dataMask"]
+        self.bands = bands
 
     '''
     B04          - Red                              - DN => FV*1000
@@ -95,10 +95,8 @@ class Worker:
 
         return config
 
-    def __download(self):
+    def __download(self, start_date, end_date):
         eval_script = self.__build_Evalscript()
-
-        start_date, end_date = Worker.qarter_to_interval(self.year, self.quarter)
 
         print(f"\n{'='*64}")
         print(f"  Quarter : {self.year} {self.quarter}  ({start_date} → {end_date})")
@@ -166,34 +164,70 @@ class Worker:
 
     def work(self):
         out_paths = []
+        start_date, end_date = Worker.qarter_to_interval(self.year, self.quarter)
 
-        raw = self.__download()
+        raw = self.__download( start_date, end_date )
         raw_arr = np.array(raw)
-        raw_arr = raw_arr[0]
-        for i, b in enumerate(self.bands):
-            out_path = self.output_dir / f"{year}_Q{quarter}_{b}.tif"
-            self.__save_geotiff(raw_arr[:, :, i], out_path)
-            out_paths.append(out_path)
 
+        if(raw_arr.shape[0] < 1):
+            raise BaseException(f"No observations in given range {start_date} - {end_date}")
+        if(raw_arr.shape[0] > 1):
+            raise BaseException(f"More observation ({raw_arr.shape[0]}) in selected time {start_date} - {end_date}. This should not happen. Check manually available data. [-y {self.year} -q {self
+            .quarter}]")
+
+        # for i in range( raw_arr.shape[0] ):
+        #     cur_obs = raw_arr[i]
+        #     for i, b in enumerate(self.bands):
+        #         out_path = self.output_dir / f"{year}_Q{quarter}_{b}{"" if raw_arr.shape[0] == 1 else i}.tif"
+        #         self.__save_geotiff(cur_obs[:, :, i], out_path)
+        #         out_paths.append(out_path)
+        cur_obs = raw_arr[0]
+        for i, b in enumerate(self.bands):
+            out_path = self.output_dir / f"{year}_Q{quarter}_{b}{"" if raw_arr.shape[0] == 1 else i}.tif"
+            self.__save_geotiff(cur_obs[:, :, i], out_path)
+            out_paths.append(out_path)
         return out_paths
 
 
 if __name__ == "__main__":
-    year = 2020
-    quarter = 1
-    AOI_BBOX = {
-        "west": 18.50000,  # ←
-        "south": 48.77910,  # ↓
-        "east": 18.83029,  # →
-        "north": 49.01070,  # ↑
-    }
+    parser = argparse.ArgumentParser(
+        prog='QuarterlyDownload',
+        description='Download quarterly products from Sentinel hub',
+        epilog='Text at the bottom of help')
+
+    parser.add_argument('-y', '--year', required=True, type=int, help='Year - time of data collection')
+    parser.add_argument('-q', '--quarter', required=True, type=int, help='Quarter of year of data collection',
+                        choices=[1, 2, 3, 4])
+    parser.add_argument('-x', '--bbox', type=float, nargs=4,
+                        default=(18.50000, 48.77910, 18.83029, 49.01070),
+                        metavar=('WEST', 'SOUTH', 'EAST', 'NORTH'),
+                        help="Area of interest in format west #←   south #↓   east #→   north #↑")
+    parser.add_argument('-o', '--output_dir', default="./out", type=Path, help="Where should tiffs be saved")
+    parser.add_argument('-s', '--secret', default="./Secret", type=Path, help="Path to file where are oauth id ind secret located in specific format")
+    parser.add_argument('-b', '--bands', nargs='+', type=str, choices=Worker.AVAILABLE_BANDS,
+                        default=["B04", "B08", "observations", "dataMask"],
+                        help="Bands to download")
+
+    args = parser.parse_args()
+    year = args.year
+    quarter = args.quarter
+    west, south, east, north = args.bbox
+    out_path = args.output_dir
+    secret_path = args.secret
+    bands = args.bands
+
+    # AOI_BBOX = {
+    #     "west": west,  # ←
+    #     "south": south,  # ↓
+    #     "east": east,  # →
+    #     "north": north,  # ↑
+    # }
 
     bbox = BBox(
-        bbox=(AOI_BBOX["west"], AOI_BBOX["south"],
-              AOI_BBOX["east"], AOI_BBOX["north"]),
+        bbox=(west, south,
+              east, north),
         crs=CRS.WGS84,
     )
-    out_path = Path("./out_full")
 
-    worker = Worker(year, quarter, bbox, out_path)
+    worker = Worker(year, quarter, bbox, out_path, bands, secret_path )
     worker.work()
