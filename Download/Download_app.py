@@ -15,10 +15,11 @@ import argparse
 class Worker:
     AVAILABLE_BANDS=["B02", "B03", "B04", "B08", "observations", "dataMask"]
     QUARTERS = [
-        ("01-01", "03-31"),
-        ("04-01", "06-30"),
-        ("07-01", "09-30"),
-        ("10-01", "12-31"),
+        # API takes yyyy-mm-dd
+        ("01-01", "01-2"), #("01-01", "03-31")
+        ("04-01", "04-2"), #("04-01", "06-30")
+        ("07-01", "07-2"), #("07-01", "09-30")
+        ("10-01", "10-2"), #("10-01", "12-31")
     ]
     RESOLUTION    = 10
     COLLECTION_ID = "5460de54-082e-473a-b6ea-d5cbe3c17cca"
@@ -31,6 +32,13 @@ class Worker:
         self.client_id, self.client_secret = self.__get_secret(path_secret)
         self.config = Worker.build_config(self.client_id, self.client_secret)
         self.bands = bands
+
+        self.img_size = bbox_to_dimensions(bbox, resolution=Worker.RESOLUTION)
+        print(f"        Image   : {self.img_size[0]} × {self.img_size[1]} px @ {Worker.RESOLUTION} m")
+
+        self.eval_script = self.__build_Evalscript()
+        self.colection = DataCollection.define_byoc(collection_id=Worker.COLLECTION_ID)
+
 
     '''
     B04          - Red                              - DN => FV*1000
@@ -68,13 +76,13 @@ class Worker:
         return EVALSCRIPT
 
 
-
-    def qarter_to_interval(year: int, quarter: int):
+    @staticmethod
+    def get_time_interval(year: int, quarter: int):
         if quarter < 0 or quarter > 4:
             raise ValueError(f"Quarter must be from 1 to 4 not {quarter}")
 
-        s, e = Worker.QUARTERS[quarter-1]
-        return f"{year}-{s}", f"{year}-{e}"
+        start, end = Worker.QUARTERS[quarter-1]
+        return f"{year}-{start}", f"{year}-{end}"
 
     @staticmethod
     def __get_secret(path_to_secret):
@@ -96,29 +104,24 @@ class Worker:
         return config
 
     def __download(self, start_date, end_date):
-        eval_script = self.__build_Evalscript()
 
         print(f"\n{'='*64}")
         print(f"  Quarter : {self.year} {self.quarter}  ({start_date} → {end_date})")
 
-        img_size = bbox_to_dimensions(bbox, resolution= Worker.RESOLUTION)
-        print(f"        Image   : {img_size[0]} × {img_size[1]} px @ {Worker.RESOLUTION} m")
-
-        colection = DataCollection.define_byoc(collection_id=Worker.COLLECTION_ID)
 
         request = SentinelHubRequest(
-            evalscript=eval_script,
+            evalscript=self.eval_script,
             input_data=[
                 SentinelHubRequest.input_data(
-                    data_collection=colection,
+                    data_collection=self.colection,
                     time_interval=(start_date, end_date),
                 )
             ],
             responses=[
                 SentinelHubRequest.output_response("default", MimeType.TIFF),
             ],
-            bbox=bbox,
-            size=img_size,
+            bbox=self.bbox,
+            size=self.img_size,
             config=self.config,
 
         )
@@ -164,7 +167,7 @@ class Worker:
 
     def work(self):
         out_paths = []
-        start_date, end_date = Worker.qarter_to_interval(self.year, self.quarter)
+        start_date, end_date = Worker.get_time_interval(self.year, self.quarter)
 
         raw = self.__download( start_date, end_date )
         raw_arr = np.array(raw)
@@ -183,9 +186,9 @@ class Worker:
         #         out_paths.append(out_path)
         cur_obs = raw_arr[0]
         for i, b in enumerate(self.bands):
-            out_path = self.output_dir / f"{year}_Q{quarter}_{b}{"" if raw_arr.shape[0] == 1 else i}.tif"
+            out_path = self.output_dir / f"{self.year}_Q{self.quarter}_{b}{"" if raw_arr.shape[0] == 1 else i}.tif"
             self.__save_geotiff(cur_obs[:, :, i], out_path)
-            out_paths.append(out_path)
+            out_paths.append(out_path.resolve())
         return out_paths
 
 
