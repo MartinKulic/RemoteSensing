@@ -20,6 +20,7 @@ OUT_DIR = Path("./Quarter_mosaics")
 inventory_file_path = OUT_DIR / "inventory.csv"
 w = Worker(START_YEAR, QUARTER, bbox, OUT_DIR, BANDS, Path("./Secret"))
 
+inventory_file_path.parent.mkdir(parents=True, exist_ok=True)
 with open(inventory_file_path, "w") as f:
   f.write("Year; Quarter; Band; Path;\n")
 
