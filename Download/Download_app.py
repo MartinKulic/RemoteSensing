@@ -155,7 +155,8 @@ class Worker:
                 predctor=3,
                 tiled=True,
         ) as dst:
-            dst.write(pixels.astype(dtype), 1)
+            #dst.write(pixels.astype(dtype), 1)
+            dst.write(pixels.astype(dtype))
             dst.update_tags(
                 DESCRIPTION="Sentinel-2 Quarterly Cloudless Mosaic NDVI",
                 COLLECTION_ID=Worker.COLLECTION_ID,
