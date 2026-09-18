@@ -2,6 +2,9 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import rasterio
+from rasterio.io import MemoryFile
+from rio_cogeo.cogeo import cog_translate
+from rio_cogeo.profiles import cog_profiles
 
 import argparse
 
@@ -47,6 +50,39 @@ class NDVI_Calculator:
 
         return ndvi_clipped, observations
 
+    def save_gtiff(self, data:np.ndarray, profile:dict, out_path:Path, desc:str="NoDescription"):
+        with rasterio.open(out_path, "w", **profile) as dst:
+            dst.update_tags(
+                DESCRIPTION=desc)
+            dst.write(data)
+
+    def save_cog_gtiff(self, data:np.ndarray, profile:dict, out_path:Path, desc:str="NoDescription"):
+        # easy way
+        # self.save_gtiff(data, profile, out_path)
+        # cog_translate(str(out_path), str(out_path), cog_profiles.get("deflate"))
+        # ----------------------
+
+        with MemoryFile() as memfile:
+            with memfile.open(**profile) as mem:
+                mem.write(data)
+                mem.update_tags(
+                    DESCRIPTION=desc
+                )
+
+                # COG profile
+                dst_profile = cog_profiles.get("deflate")
+                # dst_profile.update({"blockxsize": 256, "blockysize": 256})
+
+                # Translate to COG on disk
+                cog_translate(
+                    mem,
+                    str(out_path),
+                    dst_profile,
+                    nodata=-32768.0,
+                    use_cog_driver=True,
+                )
+
+
     def Calculate_all(self):
         out_inventory_path = self.out_dir / "ndvi_inventory.csv"
         out_inventory_path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,13 +106,14 @@ class NDVI_Calculator:
                 print(f"   {np.nanmin(ndvi)} - {np.nanmax(ndvi)}   N/A-s {np.sum(np.isnan(ndvi))}")
 
                 raster = np.array([ndvi, observations])
-                cur_tiff_path = self.out_dir / f"{year}_{quarter}_NDVI.tif"
+                cur_tiff_path = self.out_dir / f"{year}_{quarter}_NDVI_cog.tiff"
 
-                with rasterio.open(cur_tiff_path, "w", **profile) as dst:
-                    dst.update_tags(
-                        DESCRIPTION=f"NDVI quarterly composite and number of available observation - year {year}")
-                    dst.write(raster)
                 print(f"Saving geotiff {cur_tiff_path} \n")
+                #self.save_gtiff(raster, profile, cur_tiff_path, f"NDVI quarterly composite and number of available observation - year {year}")
+                self.save_cog_gtiff(raster, profile, cur_tiff_path, f"NDVI quarterly composite and number of available observation - year {year}")
+
+                cog_translate(str(cur_tiff_path), str(cur_tiff_path), cog_profiles.get("deflate"))
+                print(f"Translatedd to COG geotiff {cur_tiff_path} \n")
 
                 with open(out_inventory_path, "a") as f:
                     f.write(f"{year};{quarter};{cur_tiff_path.resolve()};\n")

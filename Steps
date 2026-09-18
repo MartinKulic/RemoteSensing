@@ -1,0 +1,13 @@
+1. Download_app
+    - Downloads bands from sentinel hub - one band one geotiff
+    - Creates inventory - csv file
+        - Year; Quarter; Band; Path
+2. NDVI_app
+    - According to inventory.csv generated in previous step generates 2 band geotiffs:
+        1. band NDVI
+        2. band observations
+    - Creates inventory - csv file
+        - Year; Quarter; Band; Path
+    - To work B04, B08 and observations bans need to be present
+3. AOI mask (optional)
+4. Fill N/A
