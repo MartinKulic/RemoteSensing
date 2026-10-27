@@ -1,3 +1,5 @@
+import math
+
 from sentinelhub import (
             SHConfig, BBox, CRS, DataCollection, MimeType,
             SentinelHubRequest, bbox_to_dimensions,
@@ -13,7 +15,7 @@ import argparse
 
 
 class Worker:
-    AVAILABLE_BANDS=["B02", "B03", "B04", "B08", "observations", "dataMask"]
+    AVAILABLE_BANDS=["B02", "B03", "B04", "B08", "observations", "dataMask", "SCL"]
     QUARTERS = [
         # API takes yyyy-mm-dd
         ("01-01", "01-2"), #("01-01", "03-31")
@@ -21,10 +23,10 @@ class Worker:
         ("07-01", "07-2"), #("07-01", "09-30")
         ("10-01", "10-2"), #("10-01", "12-31")
     ]
-    RESOLUTION    = 10
+    RESOLUTION    = 30
     COLLECTION_ID = "5460de54-082e-473a-b6ea-d5cbe3c17cca"
 
-    def __init__(self, year, quarter, bbox, path_out, bands, path_secret = "./Secret"):
+    def __init__(self, year, quarter, bbox:BBox, path_out, bands, path_secret = "./Secret"):
         self.output_dir    = path_out
         self.year = year
         self.quarter = quarter
@@ -33,8 +35,20 @@ class Worker:
         self.config = Worker.build_config(self.client_id, self.client_secret)
         self.bands = bands
 
-        self.img_size = bbox_to_dimensions(bbox, resolution=Worker.RESOLUTION)
+        # self.img_size = bbox_to_dimensions(bbox, resolution=Worker.RESOLUTION)
+        self.img_size = (
+            round(
+                (bbox.max_x - bbox.min_x) /
+                Worker.RESOLUTION
+            ),
+            round(
+                (bbox.max_y - bbox.min_y) /
+                Worker.RESOLUTION
+            )
+        )
         print(f"        Image   : {self.img_size[0]} × {self.img_size[1]} px @ {Worker.RESOLUTION} m")
+        if(self.img_size[0] > 2500 or self.img_size[1]>2500):
+            raise Exception(f"image size {self.img_size[0]} × {self.img_size[1]} too big. max 2500x2500")
 
         self.eval_script = self.__build_Evalscript()
         self.colection = DataCollection.define_byoc(collection_id=Worker.COLLECTION_ID)
@@ -103,6 +117,59 @@ class Worker:
 
         return config
 
+    @staticmethod
+    def align_bbox_to_disturbance(bbox, disturbance_path="/home/main/Downloads/slovakia/annual_disturbances_1985_2023_slovakia.tif"):
+        """
+        Expand an EPSG:3035 bounding box to match the
+        30 m pixel grid of the disturbance map.
+        """
+        with rasterio.open(disturbance_path) as src:
+
+            if src.crs.to_epsg() != 3035:
+                raise ValueError(
+                    "Disturbance map must use EPSG:3035"
+                )
+
+            if not (
+                    math.isclose(src.res[0], 30.0) and
+                    math.isclose(src.res[1], 30.0)
+            ):
+                raise ValueError(
+                    "Disturbance map must have 30 m pixels"
+                )
+
+            if not (
+                    math.isclose(src.transform.b, 0, abs_tol=1e-10)
+                    and math.isclose(src.transform.d, 0, abs_tol=1e-10)
+            ):
+                raise ValueError("Rotated raster not supported")
+
+            origin_x = src.transform.c
+            origin_y = src.transform.f
+
+        res = float(Worker.RESOLUTION)
+
+        west = origin_x + math.floor(
+            (bbox.min_x - origin_x) / res
+        ) * res
+
+        east = origin_x + math.ceil(
+            (bbox.max_x - origin_x) / res
+        ) * res
+
+        south = origin_y + math.floor(
+            (bbox.min_y - origin_y) / res
+        ) * res
+
+        north = origin_y + math.ceil(
+            (bbox.max_y - origin_y) / res
+        ) * res
+
+        return BBox(
+            bbox=(west, south, east, north),
+            crs=CRS(3035)
+        )
+
     def __download(self, start_date, end_date):
 
         print(f"\n{'='*64}")
@@ -148,15 +215,15 @@ class Worker:
                 width=cols,
                 count=1,
                 dtype=dtype,
-                crs=RioCRS.from_epsg(4326),
+                crs=RioCRS.from_epsg(self.bbox.crs.value), # eu disturbance in EPSG:3035 - ETRS89-extended / LAEA Europe
                 transform=transform,
                 nodata=no_data,
                 compress="lzw",
-                predctor=3,
+                predictor=3,
                 tiled=True,
         ) as dst:
-            #dst.write(pixels.astype(dtype), 1)
-            dst.write(pixels.astype(dtype))
+            dst.write(pixels.astype(dtype), 1)
+            #dst.write(pixels.astype(dtype))
             dst.update_tags(
                 DESCRIPTION="Sentinel-2 Quarterly Cloudless Mosaic NDVI",
                 COLLECTION_ID=Worker.COLLECTION_ID,
@@ -203,7 +270,13 @@ if __name__ == "__main__":
     parser.add_argument('-q', '--quarter', required=True, type=int, help='Quarter of year of data collection',
                         choices=[1, 2, 3, 4])
     parser.add_argument('-x', '--bbox', type=float, nargs=4,
-                        default=(18.50000, 48.77910, 18.83029, 49.01070),
+                        default=(
+                            4938550.00000,
+                            2882210.128847,
+                            5013505.29184,
+                            2957180.000000
+),
+                        #1609 × 1459 px @ 30 m
                         metavar=('WEST', 'SOUTH', 'EAST', 'NORTH'),
                         help="Area of interest in format west #←   south #↓   east #→   north #↑")
     parser.add_argument('-o', '--output_dir', default="./out", type=Path, help="Where should tiffs be saved")
@@ -230,8 +303,14 @@ if __name__ == "__main__":
     bbox = BBox(
         bbox=(west, south,
               east, north),
-        crs=CRS.WGS84,
+        crs=CRS(3035),
     )
+    bbox = Worker.align_bbox_to_disturbance(
+        bbox
+    )
+
+    print("Aligned bounding box:", bbox)
 
     worker = Worker(year, quarter, bbox, out_path, bands, secret_path )
     worker.work()
+

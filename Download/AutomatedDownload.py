@@ -5,24 +5,28 @@ from pathlib import Path
 
 
 bbox = BBox(
-    bbox=(18.50000, 48.77910, 18.83029, 49.01070),
-    crs=CRS.WGS84,
+    bbox=(4938500.0,
+          2882200.0,
+          5013450.0,
+          2957180.0),
+    crs=CRS(3035),
 )
+bbox = Worker.align_bbox_to_disturbance(bbox)
 
 START_YEAR = 2015
 END_YEAR = 2025
 
 QUARTER = 3
 
-BANDS =  ["B04", "B08", "observations"]
-OUT_DIR = Path("./Quarter_mosaics")
+BANDS =  ["B02", "B03", "B04", "B08", ]
+OUT_DIR = Path("../Qarterly_mosaics_30m_VelkaFatra")
 
 inventory_file_path = OUT_DIR / "inventory.csv"
 w = Worker(START_YEAR, QUARTER, bbox, OUT_DIR, BANDS, Path("./Secret"))
 
 inventory_file_path.parent.mkdir(parents=True, exist_ok=True)
 with open(inventory_file_path, "w") as f:
-  f.write("Year; Quarter; Band; Path;\n")
+  f.write("Year;Quarter;Band;Path;\n")
 
 
 for year in range(START_YEAR, END_YEAR+1):

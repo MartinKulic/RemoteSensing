@@ -69,7 +69,6 @@ class NDVI_Calculator:
                     DESCRIPTION=desc
                 )
 
-                # COG profile
                 dst_profile = cog_profiles.get("deflate")
                 # dst_profile.update({"blockxsize": 256, "blockysize": 256})
 
@@ -80,6 +79,7 @@ class NDVI_Calculator:
                     dst_profile,
                     nodata=-32768.0,
                     use_cog_driver=True,
+                    in_memory=False
                 )
 
 
@@ -106,14 +106,12 @@ class NDVI_Calculator:
                 print(f"   {np.nanmin(ndvi)} - {np.nanmax(ndvi)}   N/A-s {np.sum(np.isnan(ndvi))}")
 
                 raster = np.array([ndvi, observations])
-                cur_tiff_path = self.out_dir / f"{year}_{quarter}_NDVI_cog.tiff"
+                cur_tiff_path = self.out_dir / f"{year}_{quarter}_NDVI_cog.tif"
 
                 print(f"Saving geotiff {cur_tiff_path} \n")
                 #self.save_gtiff(raster, profile, cur_tiff_path, f"NDVI quarterly composite and number of available observation - year {year}")
                 self.save_cog_gtiff(raster, profile, cur_tiff_path, f"NDVI quarterly composite and number of available observation - year {year}")
-
-                cog_translate(str(cur_tiff_path), str(cur_tiff_path), cog_profiles.get("deflate"))
-                print(f"Translatedd to COG geotiff {cur_tiff_path} \n")
+                print("\n"*2)
 
                 with open(out_inventory_path, "a") as f:
                     f.write(f"{year};{quarter};{cur_tiff_path.resolve()};\n")
