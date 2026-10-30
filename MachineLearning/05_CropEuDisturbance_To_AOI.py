@@ -55,13 +55,12 @@ FOREST_MASK_TIF = Path(
 )
 
 INVENTORY_BANDS_CSV = Path(
-    "/home/main/repositories/RemoteSensing/"
-    "Qarterly_mosaics_30m_VelkaFatra/inventory.csv"
+    "/home/main/repositories/RemoteSensing/Qarterly_mosaics_30m_TestArea/inventory.csv"
 )
 
 OUTPUT_DIR = Path(
     "/home/main/repositories/RemoteSensing/"
-    "MachineLearning/dataset"
+    "MachineLearning/dataset/TestArea"
 )
 
 inventory = pd.read_csv(

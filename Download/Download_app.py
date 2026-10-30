@@ -14,6 +14,7 @@ from pathlib import Path
 import argparse
 
 
+
 class Worker:
     AVAILABLE_BANDS=["B02", "B03", "B04", "B08", "observations", "dataMask", "SCL"]
     QUARTERS = [

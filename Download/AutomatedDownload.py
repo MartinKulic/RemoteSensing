@@ -2,7 +2,20 @@ from sentinelhub import BBox, CRS
 from Download_app import Worker
 from pathlib import Path
 
+TestBBox =[
+  5027500.000,
+  2882625.000,
+  5043629.000,
+  2898772.000
+]
 
+test_area_BBox = BBox(
+    bbox= (5027500.000,
+           2882300.000,
+           5043980.000,
+           2898772.000),
+    crs=CRS(3035),
+)
 
 bbox = BBox(
     bbox=(4938500.0,
@@ -11,15 +24,18 @@ bbox = BBox(
           2957180.0),
     crs=CRS(3035),
 )
+
+bbox = test_area_BBox
+
 bbox = Worker.align_bbox_to_disturbance(bbox)
 
-START_YEAR = 2015
-END_YEAR = 2025
+START_YEAR = 2022-2
+END_YEAR = 2022+1
 
 QUARTER = 3
 
 BANDS =  ["B02", "B03", "B04", "B08", ]
-OUT_DIR = Path("../Qarterly_mosaics_30m_VelkaFatra")
+OUT_DIR = Path("../Qarterly_mosaics_30m_TestArea")
 
 inventory_file_path = OUT_DIR / "inventory.csv"
 w = Worker(START_YEAR, QUARTER, bbox, OUT_DIR, BANDS, Path("./Secret"))
