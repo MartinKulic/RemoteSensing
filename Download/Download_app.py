@@ -13,6 +13,8 @@ import numpy as np
 from pathlib import Path
 import argparse
 
+# Fail save because pycharm like to trick me to run this file
+raise Exception("NOOO, if you really intendet to run this file simply remove this exception. This is fail save preventing accidental start")
 
 
 class Worker:
