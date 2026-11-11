@@ -29,8 +29,8 @@ bbox = test_area_BBox
 
 bbox = Worker.align_bbox_to_disturbance(bbox)
 
-START_YEAR = 2022-2
-END_YEAR = 2022+1
+START_YEAR = 2015
+END_YEAR = 2025
 
 QUARTER = 3
 
